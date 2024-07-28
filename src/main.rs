@@ -7,6 +7,9 @@ struct KeyMap {
 }
 
 #[derive(Component)]
+struct ArenaWall;
+
+#[derive(Component)]
 struct Ball;
 
 #[derive(Component)]
@@ -18,6 +21,12 @@ struct Velocity {
 #[derive(Component)]
 struct PlayerController {
     keymap: KeyMap
+}
+
+#[derive(Component)]
+struct GameMode {
+    player1_score: u8,
+    player2_score: u8
 }
 
 impl PlayerController {
@@ -47,6 +56,8 @@ fn init(mut commands: Commands,
         },
         ..default()
     });
+
+    commands.spawn(GameMode { player1_score: 0, player2_score: 0 });
 
     let player1_position: Vec3 = Vec3::new(64., 0., 0.);
     let player1_paddle = MaterialMesh2dBundle {
@@ -90,12 +101,20 @@ fn init(mut commands: Commands,
         material: materials.add(Color::from(WHITE)),
         ..default()
     };
+
     commands.spawn((ball,
                     Velocity {
                         speed: 100.,
                         direction: Vec2::new(1., 1.)
                     },
                     Ball));
+
+    // Arena
+    commands.spawn((ColliderAabb::new(Vec2::new(0., 250.), Vec2::new(250., 8.)), ArenaWall));
+    commands.spawn((ColliderAabb::new(Vec2::new(0., -250.), Vec2::new(250., 8.)), ArenaWall));
+
+    commands.spawn((ColliderAabb::new(Vec2::new(250., 0.), Vec2::new(8., 250.)), ArenaWall));
+    commands.spawn((ColliderAabb::new(Vec2::new(-250., 0.), Vec2::new(8., 250.)), ArenaWall));
 }
 
 
@@ -133,22 +152,24 @@ fn calculate_collision_side(effector: ColliderAabb, effected: ColliderAabb) -> C
     let offset_scale = (effector.size() + effected.size()) / 2.;
 
     let side = if offset_scale.x == offset_distance.x {
-        if offset_scale.x < 0. {
+        if offset.x < 0. {
             CollisionSide::Left
         }
         else {
             CollisionSide::Right
         }
-    }
-    else if offset_scale.y == offset_distance.y {
-        if offset_scale.y < 0. {
+    } else if offset_scale.y == offset_distance.y {
+        if offset.y < 0. {
             CollisionSide:: Bottom
         }
         else {
             CollisionSide::Top
         }
-    }
-    else {
+    } else {
+        // FIXME: When the player's paddle is moving towards the colliding ball
+        // this will get triggered because the paddle moves over the ball's
+        // collider.
+        warn!("effected pos: {} {}", effected.center().x, effected.center().y);
         warn!("offset: {} {}", offset.x, offset.y);
         warn!("effector size: {} {}", effector.size().x, effector.size().y);
         warn!("effected size: {} {}", effected.size().x, effected.size().y);
@@ -159,14 +180,18 @@ fn calculate_collision_side(effector: ColliderAabb, effected: ColliderAabb) -> C
     side
 }
 
-fn detect_collision(mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
-                    collider_query: Query<&Transform, With<PlayerController>>) {
+fn detect_collision(mut game_query: Query<&mut GameMode>,
+                    mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
+                    paddle_query: Query<&Transform, With<PlayerController>>,
+                    arena_query: Query<&ColliderAabb, With<ArenaWall>>) {
     let (mut ball_velocity, ball_transform) = ball_query.single_mut();
     let ball_collider = ColliderAabb::new(ball_transform.translation.truncate(), ball_transform.scale.truncate() / 2.);
 
-    debug!("Colliders: {}", collider_query.iter().len());
+    let mut game_mode = game_query.single_mut();
 
-    for transform in &collider_query {
+    debug!("Colliders: {}", paddle_query.iter().len());
+
+    for transform in &paddle_query {
         debug!("Checking collision");
         let collider = ColliderAabb::new(transform.translation.truncate(), transform.scale.truncate() / 2.);
         if !collider.intersects(&ball_collider) {
@@ -185,12 +210,54 @@ fn detect_collision(mut ball_query: Query<(&mut Velocity, &Transform), With<Ball
             CollisionSide::Right | CollisionSide::Left => ball_velocity.direction.x = -ball_velocity.direction.x,
         }
     }
+
+    for &wall_collider in &arena_query {
+        debug!("Checking collision");
+        if !wall_collider.intersects(&ball_collider) {
+            debug!("No collision detected");
+            continue;
+        }
+
+        debug!("Collision detected");
+
+        // update balls velocity after the collision
+        let impact_side: CollisionSide = calculate_collision_side(ball_collider, wall_collider);
+
+        // reflect the velocity based on the collision side
+        match impact_side {
+            CollisionSide::Top | CollisionSide::Bottom => ball_velocity.direction.y = -ball_velocity.direction.y,
+            CollisionSide::Right => {
+                ball_velocity.direction.x = -ball_velocity.direction.x;
+                game_mode.player1_score += 1;
+                info!("Player 1 scored: {}", game_mode.player1_score);
+            },
+            CollisionSide::Left => {
+                ball_velocity.direction.x = -ball_velocity.direction.x;
+                game_mode.player2_score += 1;
+                info!("Player 2 scored: {}", game_mode.player2_score);
+            }
+        }
+    }
+}
+
+fn check_score(game_query: Query<&mut GameMode>) {
+    let game_mode = game_query.single();
+
+    if game_mode.player1_score > game_mode.player2_score {
+        if game_mode.player1_score == 5 {
+            info!("Player 1 Wins!");
+        }
+    } else {
+        if game_mode.player2_score == 5 {
+            info!("Player 2 Wins!");
+        }
+    }
 }
 
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, PhysicsPlugins::default()))
         .add_systems(Startup, init)
-        .add_systems(Update, (ball_move, paddles_move, detect_collision).chain())
+        .add_systems(Update, (ball_move, paddles_move, detect_collision, check_score).chain())
         .run();
 }
