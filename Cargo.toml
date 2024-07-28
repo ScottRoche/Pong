@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 avian2d = "0.1.1"
 bevy = "0.14.0"
+rand = "0.8.5"
 
 # Enable a small amount of optimization in debug mode
 [profile.dev]

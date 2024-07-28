@@ -1,5 +1,6 @@
 use bevy::{color::palettes::basic::WHITE, prelude::*, sprite::MaterialMesh2dBundle};
 use avian2d::prelude::*;
+use rand::Rng;
 
 struct KeyMap {
     up: KeyCode,
@@ -20,6 +21,7 @@ struct Velocity {
 
 #[derive(Component)]
 struct PlayerController {
+    id: i8,
     keymap: KeyMap
 }
 
@@ -27,6 +29,14 @@ struct PlayerController {
 struct GameMode {
     player1_score: u8,
     player2_score: u8
+}
+
+#[derive(States, Debug, Clone, PartialEq, Eq, Hash)]
+enum GameState {
+    RoundStart,
+    Playing,
+    RoundFinished,
+    GameFinished
 }
 
 impl PlayerController {
@@ -46,7 +56,8 @@ impl PlayerController {
 
 fn init(mut commands: Commands,
         mut meshes: ResMut<Assets<Mesh>>,
-        mut materials: ResMut<Assets<ColorMaterial>>) {
+        mut materials: ResMut<Assets<ColorMaterial>>,
+        mut next_state: ResMut<NextState<GameState>>) {
     info!("Starting");
 
     commands.spawn(Camera2dBundle {
@@ -70,6 +81,7 @@ fn init(mut commands: Commands,
     };
     commands.spawn((player1_paddle,
                     PlayerController {
+                        id: 0,
                         keymap: KeyMap {
                             up: KeyCode::ArrowUp,
                             down: KeyCode::ArrowDown,
@@ -88,6 +100,7 @@ fn init(mut commands: Commands,
 
     commands.spawn((player2_paddle,
                     PlayerController {
+                        id: 1,
                         keymap: KeyMap {
                             up: KeyCode::KeyW,
                             down: KeyCode::KeyS,
@@ -115,6 +128,8 @@ fn init(mut commands: Commands,
 
     commands.spawn((ColliderAabb::new(Vec2::new(250., 0.), Vec2::new(8., 250.)), ArenaWall));
     commands.spawn((ColliderAabb::new(Vec2::new(-250., 0.), Vec2::new(8., 250.)), ArenaWall));
+
+    next_state.set(GameState::Playing);
 }
 
 
@@ -183,7 +198,8 @@ fn calculate_collision_side(effector: ColliderAabb, effected: ColliderAabb) -> C
 fn detect_collision(mut game_query: Query<&mut GameMode>,
                     mut ball_query: Query<(&mut Velocity, &Transform), With<Ball>>,
                     paddle_query: Query<&Transform, With<PlayerController>>,
-                    arena_query: Query<&ColliderAabb, With<ArenaWall>>) {
+                    arena_query: Query<&ColliderAabb, With<ArenaWall>>,
+                    mut next_state: ResMut<NextState<GameState>>) {
     let (mut ball_velocity, ball_transform) = ball_query.single_mut();
     let ball_collider = ColliderAabb::new(ball_transform.translation.truncate(), ball_transform.scale.truncate() / 2.);
 
@@ -230,34 +246,112 @@ fn detect_collision(mut game_query: Query<&mut GameMode>,
                 ball_velocity.direction.x = -ball_velocity.direction.x;
                 game_mode.player1_score += 1;
                 info!("Player 1 scored: {}", game_mode.player1_score);
+                next_state.set(GameState::RoundFinished);
             },
             CollisionSide::Left => {
                 ball_velocity.direction.x = -ball_velocity.direction.x;
                 game_mode.player2_score += 1;
                 info!("Player 2 scored: {}", game_mode.player2_score);
+                next_state.set(GameState::RoundFinished);
             }
         }
     }
 }
 
-fn check_score(game_query: Query<&mut GameMode>) {
-    let game_mode = game_query.single();
-
-    if game_mode.player1_score > game_mode.player2_score {
-        if game_mode.player1_score == 5 {
-            info!("Player 1 Wins!");
-        }
-    } else {
-        if game_mode.player2_score == 5 {
-            info!("Player 2 Wins!");
+fn paddles_reset(mut paddle_query: Query<(&mut Transform, &PlayerController)>) {
+    for (mut transform, controller) in &mut paddle_query {
+        if controller.id == 0 {
+            transform.translation = Vec3::new(64., 0., 0.);
+        } else {
+            transform.translation = Vec3::new(-64., 0., 0.);
         }
     }
 }
 
+fn ball_reset(mut ball_query: Query<(&mut Velocity, &mut Transform), With<Ball>>) {
+    let (mut velocity, mut transform) = ball_query.single_mut();
+
+    let mut rng = rand::thread_rng();
+
+    velocity.direction = Vec2::new(rng.gen_range(-1.0..1.0), rng.gen_range(-1.0..1.0)).normalize();
+    transform.translation = Vec3::splat(0.);
+}
+
+fn start_round(mut next_state: ResMut<NextState<GameState>>) {
+    next_state.set(GameState::Playing);
+}
+
+fn check_score(game_query: Query<&mut GameMode>,
+               mut next_state: ResMut<NextState<GameState>>) {
+    let game_mode = game_query.single();
+
+    if game_mode.player1_score == 5 {
+        info!("Player 1 Wins!");
+        info!("Final score: {} - {}", game_mode.player1_score, game_mode.player2_score);
+        next_state.set(GameState::GameFinished);
+    } else if game_mode.player2_score == 5 {
+        info!("Player 2 Wins!");
+        info!("Final score: {} - {}", game_mode.player1_score, game_mode.player2_score);
+        next_state.set(GameState::GameFinished);
+    } else {
+        next_state.set(GameState::RoundStart);
+    }
+}
+
+fn end_game(mut exit: EventWriter<AppExit>) {
+    exit.send(AppExit::Success);
+}
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+struct RoundStartSet;
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+struct PlayingSet;
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+struct RoundFinishedSet;
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+struct GameFinishedSet;
+
 fn main() {
-    App::new()
-        .add_plugins((DefaultPlugins, PhysicsPlugins::default()))
+    let mut app = App::new();
+
+    app.configure_sets(Update, (
+            RoundStartSet
+                .run_if(in_state(GameState::RoundStart)),
+            PlayingSet
+                .run_if(in_state(GameState::Playing)),
+            RoundFinishedSet
+                .run_if(in_state(GameState::RoundFinished)),
+            GameFinishedSet
+                .run_if(in_state(GameState::GameFinished))
+    ));
+
+    app.add_plugins((DefaultPlugins, PhysicsPlugins::default()))
         .add_systems(Startup, init)
-        .add_systems(Update, (ball_move, paddles_move, detect_collision, check_score).chain())
+        .add_systems(Update, (
+            (
+                (
+                    (
+                        ball_reset,
+                        paddles_reset
+                    ),
+                    start_round
+                ).chain()
+            ).in_set(RoundStartSet),
+            (
+                ball_move,
+                paddles_move,
+                detect_collision,
+            ).chain().in_set(PlayingSet),
+            (
+                check_score
+            ).in_set(RoundFinishedSet),
+            (
+                end_game
+            ).in_set(GameFinishedSet)
+        ))
+        .insert_state(GameState::RoundStart)
         .run();
 }
